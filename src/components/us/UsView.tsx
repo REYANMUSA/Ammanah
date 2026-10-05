@@ -63,6 +63,13 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
   const [personalDesc, setPersonalDesc] = useState('');
   const [personalCategory, setPersonalCategory] = useState('Deen');
 
+  // Our Journey add-moment form (uses the same existing memories backend)
+  const [showJourneyModal, setShowJourneyModal] = useState(false);
+  const [journeyTitle, setJourneyTitle] = useState('');
+  const [journeyDescription, setJourneyDescription] = useState('');
+  const [journeyDate, setJourneyDate] = useState(new Date().toISOString().slice(0, 10));
+  const [journeyEventType, setJourneyEventType] = useState<Memory['event_type']>('Important date');
+
   const loadData = async () => {
     const rel = await dataService.loadRelationship();
     setRelationship(rel);
@@ -158,6 +165,31 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
       await dataService.deleteSharedGoal(goalId);
       setSharedGoals((prev) => prev.filter((g) => g.id !== goalId));
     }
+  };
+
+  const handleAddJourneyMoment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!journeyTitle.trim()) return;
+    const created = await dataService.createMemory({
+      title: journeyTitle.trim(),
+      description: journeyDescription.trim(),
+      event_date: journeyDate,
+      event_type: journeyEventType,
+      image_url: '',
+    });
+    setMemories((prev) => [created, ...prev]);
+    setJourneyTitle('');
+    setJourneyDescription('');
+    setJourneyDate(new Date().toISOString().slice(0, 10));
+    setJourneyEventType('Important date');
+    setShowJourneyModal(false);
+    playCalmChime();
+  };
+
+  const handleDeleteJourneyMoment = async (id: string) => {
+    if (!confirm('Delete this moment from your private journey?')) return;
+    await dataService.deleteMemory(id);
+    setMemories((prev) => prev.filter((m) => m.id !== id));
   };
 
   const handleDeletePersonalGoal = async (goalId: string) => {
@@ -526,6 +558,13 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
             <span className="text-xs font-semibold text-[#1F2421] uppercase tracking-wider">
               Journey Timeline & Milestones
             </span>
+            <button
+              onClick={() => setShowJourneyModal(true)}
+              className="flex items-center gap-1 text-xs font-medium text-[#2E473B] hover:text-[#1F2421]"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Moment</span>
+            </button>
           </div>
 
           <div className="relative pl-6 space-y-6 before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-[#E3DDD1]">
@@ -533,7 +572,7 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
               <div key={m.id} className="relative group">
                 <div className="absolute -left-6 top-1.5 w-3.5 h-3.5 rounded-full bg-[#988158] border-2 border-white shadow-xs" />
                 <div className="p-4 rounded-2xl bg-white border border-[#EAE6DD] shadow-xs space-y-2">
-                  <div className="flex items-start justify-between">
+                  <div className="flex items-start justify-between gap-2">
                     <div>
                       <span className="text-[10px] font-semibold text-[#7A6B53] uppercase tracking-wider">
                         {m.event_type} · {new Date(m.event_date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
@@ -542,6 +581,13 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
                         {m.title}
                       </h3>
                     </div>
+                    <button
+                      onClick={() => handleDeleteJourneyMoment(m.id)}
+                      className="p-1 text-[#9CA69F] hover:text-[#B93815] transition-colors"
+                      aria-label="Delete moment"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                   {m.description && (
                     <p className="text-xs text-[#505D54] leading-relaxed">
@@ -565,6 +611,59 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Our Journey Add Moment Modal */}
+      {showJourneyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <form onSubmit={handleAddJourneyMoment} className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl border border-[#E3DDD1] space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-serif font-bold text-[#1F2421]">Add Journey Moment</h4>
+              <button type="button" onClick={() => setShowJourneyModal(false)} className="text-xs text-[#6B756E]">Cancel</button>
+            </div>
+            <input
+              value={journeyTitle}
+              onChange={(e) => setJourneyTitle(e.target.value)}
+              placeholder="Moment title"
+              className="w-full px-3 py-2 rounded-xl border border-[#D5CEC2] text-xs focus:outline-none focus:ring-1 focus:ring-[#2E473B]"
+              required
+            />
+            <textarea
+              value={journeyDescription}
+              onChange={(e) => setJourneyDescription(e.target.value)}
+              placeholder="Description (optional)"
+              rows={3}
+              className="w-full px-3 py-2 rounded-xl border border-[#D5CEC2] text-xs resize-none focus:outline-none focus:ring-1 focus:ring-[#2E473B]"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="date"
+                value={journeyDate}
+                onChange={(e) => setJourneyDate(e.target.value)}
+                className="px-3 py-2 rounded-xl border border-[#D5CEC2] text-xs focus:outline-none focus:ring-1 focus:ring-[#2E473B]"
+                required
+              />
+              <select
+                value={journeyEventType}
+                onChange={(e) => setJourneyEventType(e.target.value as Memory['event_type'])}
+                className="px-3 py-2 rounded-xl border border-[#D5CEC2] text-xs focus:outline-none focus:ring-1 focus:ring-[#2E473B]"
+              >
+                <option>Important date</option>
+                <option>Day met</option>
+                <option>Day talked</option>
+                <option>Day chose not to talk</option>
+                <option>Birthday</option>
+                <option>Celebration</option>
+              </select>
+            </div>
+            <button
+              type="submit"
+              className="w-full px-4 py-2 rounded-xl bg-[#2E473B] text-white text-xs font-medium hover:bg-[#23372E]"
+            >
+              Save Moment
+            </button>
+          </form>
         </div>
       )}
 
