@@ -243,6 +243,211 @@ function writeLocal<T>(key: string, value: T): void {
 // ---------------- DATA SERVICE CLASS ----------------
 
 class AmanahDataService {
+  // ---------------- CONNECTED US DATA ----------------
+
+  private async getAuthUserId(): Promise<string | null> {
+    const sb = getSupabase();
+    if (!sb) return null;
+    try {
+      const { data } = await sb.auth.getUser();
+      return data.user?.id || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async loadRelationship(): Promise<Relationship> {
+    const sb = getSupabase();
+    const userId = await this.getAuthUserId();
+    if (!sb || !userId) return this.getRelationship();
+
+    try {
+      const { data, error } = await sb
+        .from('relationships')
+        .select('*')
+        .or(`user_a.eq.${userId},user_b.eq.${userId}`)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (data) {
+        const current = this.getRelationship();
+        const relationship: Relationship = {
+          ...(data as Relationship),
+          partner_name: current.partner_name || 'Connected Person',
+        };
+        writeLocal(STORAGE_KEYS.RELATIONSHIPS, relationship);
+        return relationship;
+      }
+
+      const relationship: Relationship = {
+        id: generateUUID(),
+        user_a: userId,
+        invite_code: 'AMANAH-' + Math.random().toString(36).substring(2, 7).toUpperCase(),
+        status: 'pending',
+        partner_name: 'Connected Person',
+        created_at: new Date().toISOString(),
+      };
+
+      const { data: created, error: createError } = await sb
+        .from('relationships')
+        .insert({
+          user_a: userId,
+          invite_code: relationship.invite_code,
+          status: 'pending',
+        })
+        .select()
+        .single();
+
+      if (createError) throw createError;
+
+      const saved = { ...relationship, ...(created as Relationship) };
+      writeLocal(STORAGE_KEYS.RELATIONSHIPS, saved);
+      return saved;
+    } catch (err) {
+      console.warn('Supabase relationship load error:', err);
+      return this.getRelationship();
+    }
+  }
+
+  async connectRelationship(inviteCode: string): Promise<Relationship | null> {
+    const sb = getSupabase();
+    const userId = await this.getAuthUserId();
+    if (!sb || !userId) return null;
+
+    const { data, error } = await sb.rpc('connect_by_invite_code', {
+      p_invite_code: inviteCode.trim().toUpperCase(),
+    });
+
+    if (error || !data) {
+      console.warn('Supabase relationship connect error:', error);
+      return null;
+    }
+
+    const relationship: Relationship = {
+      ...(data as Relationship),
+      partner_name: 'Connected Person',
+    };
+    writeLocal(STORAGE_KEYS.RELATIONSHIPS, relationship);
+    return relationship;
+  }
+
+  async loadPartnerGoals(relationship?: Relationship): Promise<Goal[]> {
+    const sb = getSupabase();
+    const rel = relationship || await this.loadRelationship();
+    const userId = await this.getAuthUserId();
+    if (!sb || !userId || rel.status !== 'accepted' || !rel.user_b) return [];
+
+    const partnerId = rel.user_a === userId ? rel.user_b : rel.user_a;
+    const { data, error } = await sb
+      .from('goals')
+      .select('*')
+      .eq('user_id', partnerId)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.warn('Supabase partner goals load error:', error);
+      return [];
+    }
+    return (data || []) as Goal[];
+  }
+
+  async loadSharedGoals(relationship?: Relationship): Promise<SharedGoal[]> {
+    const sb = getSupabase();
+    const rel = relationship || await this.loadRelationship();
+    if (!sb || rel.status !== 'accepted') return this.getSharedGoals();
+
+    const { data, error } = await sb
+      .from('shared_goals')
+      .select('*')
+      .eq('relationship_id', rel.id)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.warn('Supabase shared goals load error:', error);
+      return this.getSharedGoals();
+    }
+
+    const goals = (data || []) as SharedGoal[];
+    writeLocal(STORAGE_KEYS.SHARED_GOALS, goals);
+    return goals;
+  }
+
+  async loadMemories(relationship?: Relationship): Promise<Memory[]> {
+    const sb = getSupabase();
+    const rel = relationship || await this.loadRelationship();
+    const userId = await this.getAuthUserId();
+    if (!sb || !userId || rel.status !== 'accepted') return this.getMemories();
+
+    const localMemories = this.getMemories();
+    if (localMemories.length > 0) {
+      const unsynced = localMemories.map((memory) => ({
+        ...memory,
+        user_id: userId,
+        relationship_id: rel.id,
+      }));
+      const { error: syncError } = await sb.from('memories').upsert(unsynced, { onConflict: 'id' });
+      if (syncError) console.warn('Supabase memory sync error:', syncError);
+    }
+
+    const { data, error } = await sb
+      .from('memories')
+      .select('*')
+      .eq('relationship_id', rel.id)
+      .order('event_date', { ascending: true })
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.warn('Supabase memories load error:', error);
+      return localMemories;
+    }
+
+    const memories = (data || []) as Memory[];
+    writeLocal(STORAGE_KEYS.MEMORIES, memories);
+    return memories;
+  }
+
+  async loadEmergencyRequests(): Promise<EmergencyRequest[]> {
+    const sb = getSupabase();
+    const userId = await this.getAuthUserId();
+    if (!sb || !userId) return this.getEmergencyRequests();
+
+    const { data, error } = await sb
+      .from('emergency_requests')
+      .select('*')
+      .or(`sender_user_id.eq.${userId},recipient_user_id.eq.${userId}`)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.warn('Supabase emergency load error:', error);
+      return this.getEmergencyRequests();
+    }
+
+    const requests = (data || []) as EmergencyRequest[];
+    writeLocal(STORAGE_KEYS.EMERGENCY_REQUESTS, requests);
+    return requests;
+  }
+
+  subscribeToUsChanges(onChange: () => void): () => void {
+    const sb = getSupabase();
+    if (!sb) return () => {};
+
+    const channel = sb
+      .channel('amanah-us-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'relationships' }, onChange)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shared_goals' }, onChange)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'goals' }, onChange)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'memories' }, onChange)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'emergency_requests' }, onChange)
+      .subscribe();
+
+    return () => {
+      sb.removeChannel(channel);
+    };
+  }
+
   // PROFILE
   getProfile(): Profile {
     return readLocal<Profile>(STORAGE_KEYS.PROFILE, DEFAULT_PROFILE);
@@ -683,10 +888,15 @@ class AmanahDataService {
   async createSharedGoal(data: Omit<SharedGoal, 'id' | 'owner_user_id' | 'created_at' | 'updated_at'>): Promise<SharedGoal> {
     const goals = this.getSharedGoals();
     const profile = this.getProfile();
+    const relationship = await this.loadRelationship();
     const newShared: SharedGoal = {
       id: generateUUID(),
       owner_user_id: profile.user_id,
       ...data,
+      partner_user_id: relationship.status === 'accepted'
+        ? (relationship.user_a === profile.user_id ? relationship.user_b : relationship.user_a)
+        : undefined,
+      relationship_id: relationship.status === 'accepted' ? relationship.id : undefined,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -858,10 +1068,12 @@ class AmanahDataService {
   async createMemory(data: Omit<Memory, 'id' | 'user_id' | 'created_at'>): Promise<Memory> {
     const memories = this.getMemories();
     const profile = this.getProfile();
+    const relationship = await this.loadRelationship();
     const newMemory: Memory = {
       id: generateUUID(),
       user_id: profile.user_id,
       ...data,
+      relationship_id: relationship.status === 'accepted' ? relationship.id : data.relationship_id,
       created_at: new Date().toISOString(),
     };
     writeLocal(STORAGE_KEYS.MEMORIES, [newMemory, ...memories]);
@@ -1045,7 +1257,7 @@ class AmanahDataService {
   async sendEmergencyRequest(message: string = 'I NEED YOU'): Promise<EmergencyRequest> {
     const list = this.getEmergencyRequests();
     const profile = this.getProfile();
-    const relationship = this.getRelationship();
+    const relationship = await this.loadRelationship();
 
     const request: EmergencyRequest = {
       id: generateUUID(),
