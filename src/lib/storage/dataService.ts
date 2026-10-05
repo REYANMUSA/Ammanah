@@ -261,6 +261,11 @@ class AmanahDataService {
     const userId = await this.getAuthUserId();
     if (!sb || !userId) return this.getRelationship();
 
+    const localProfile = this.getProfile();
+    if (localProfile.user_id !== userId) {
+      writeLocal(STORAGE_KEYS.PROFILE, { ...localProfile, user_id: userId, updated_at: new Date().toISOString() });
+    }
+
     try {
       const { data, error } = await sb
         .from('relationships')
@@ -385,6 +390,9 @@ class AmanahDataService {
     if (localMemories.length > 0) {
       const unsynced = localMemories.map((memory) => ({
         ...memory,
+        id: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(memory.id)
+          ? memory.id
+          : generateUUID(),
         user_id: userId,
         relationship_id: rel.id,
       }));
@@ -967,12 +975,35 @@ class AmanahDataService {
   }
 
   async updateRelationship(updates: Partial<Relationship>): Promise<Relationship> {
-    const current = this.getRelationship();
+    const current = await this.loadRelationship();
     const updated: Relationship = {
       ...current,
       ...updates,
     };
     writeLocal(STORAGE_KEYS.RELATIONSHIPS, updated);
+
+    const sb = getSupabase();
+    const userId = await this.getAuthUserId();
+    if (sb && userId && current.id !== 'rel-local') {
+      try {
+        const dbUpdates = { ...updates };
+        delete (dbUpdates as Partial<Relationship>).partner_name;
+        const { data, error } = await sb
+          .from('relationships')
+          .update(dbUpdates)
+          .eq('id', current.id)
+          .select()
+          .single();
+        if (!error && data) {
+          const saved = { ...updated, ...(data as Relationship) };
+          writeLocal(STORAGE_KEYS.RELATIONSHIPS, saved);
+          return saved;
+        }
+      } catch (err) {
+        console.warn('Supabase relationship update error:', err);
+      }
+    }
+
     return updated;
   }
 
