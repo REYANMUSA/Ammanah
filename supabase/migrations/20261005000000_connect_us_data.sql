@@ -1,3 +1,6 @@
+alter table if exists public.emergency_requests
+  add column if not exists recipient_user_id text;
+
 -- Amanah connection sync: link the existing accounts and make shared Us data database-backed.
 -- This migration is intentionally additive; it does not change the existing UI or delete user data.
 
@@ -9,7 +12,7 @@ set search_path = ''
 as $$
 declare
   v_relationship public.relationships;
-  v_user_id uuid := (select auth.uid());
+  v_user_id text := (select auth.uid())::text;
 begin
   if v_user_id is null then
     raise exception 'Authentication required';
@@ -56,9 +59,9 @@ create policy "Users can view linked partner goals"
       from public.relationships r
       where r.status = 'accepted'
         and (
-          (r.user_a = (select auth.uid()) and r.user_b = public.goals.user_id)
+          (r.user_a = (select auth.uid())::text and r.user_b = public.goals.user_id)
           or
-          (r.user_b = (select auth.uid()) and r.user_a = public.goals.user_id)
+          (r.user_b = (select auth.uid())::text and r.user_a = public.goals.user_id)
         )
     )
   );
@@ -74,7 +77,7 @@ create policy "Users can view linked partner memories"
       from public.relationships r
       where r.status = 'accepted'
         and r.id = public.memories.relationship_id
-        and ((r.user_a = (select auth.uid())) or (r.user_b = (select auth.uid())))
+        and ((r.user_a = (select auth.uid())::text) or (r.user_b = (select auth.uid())::text))
     )
   );
 
