@@ -42,6 +42,7 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
   const [personalGoals, setPersonalGoals] = useState<Goal[]>(dataService.getGoals());
   const [sharedGoals, setSharedGoals] = useState<SharedGoal[]>(dataService.getSharedGoals());
   const [memories, setMemories] = useState<Memory[]>(dataService.getMemories());
+  const [partnerGoals, setPartnerGoals] = useState<Goal[]>([]);
   const [emergencyRequests, setEmergencyRequests] = useState<EmergencyRequest[]>(dataService.getEmergencyRequests());
 
   // Tab order: My Goals -> Her Goals -> Our Goals -> Gallery -> Our Journey -> Connection
@@ -62,16 +63,22 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
   const [personalDesc, setPersonalDesc] = useState('');
   const [personalCategory, setPersonalCategory] = useState('Deen');
 
-  const loadData = () => {
-    setRelationship(dataService.getRelationship());
+  const loadData = async () => {
+    const rel = await dataService.loadRelationship();
+    setRelationship(rel);
     setPersonalGoals(dataService.getGoals());
-    setSharedGoals(dataService.getSharedGoals());
-    setMemories(dataService.getMemories());
-    setEmergencyRequests(dataService.getEmergencyRequests());
+    setSharedGoals(await dataService.loadSharedGoals(rel));
+    setMemories(await dataService.loadMemories(rel));
+    setEmergencyRequests(await dataService.loadEmergencyRequests());
+    setPartnerGoals(await dataService.loadPartnerGoals(rel));
   };
 
   useEffect(() => {
-    loadData();
+    void loadData();
+    const unsubscribe = dataService.subscribeToUsChanges(() => {
+      void loadData();
+    });
+    return unsubscribe;
   }, []);
 
   const handleCopyCode = () => {
@@ -84,13 +91,11 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
   const handleConnectPartner = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputInviteCode.trim()) return;
-    const updated = await dataService.updateRelationship({
-      status: 'accepted',
-      partner_name: 'Connected Person',
-      accepted_at: new Date().toISOString(),
-    });
+    const updated = await dataService.connectRelationship(inputInviteCode);
+    if (!updated) return;
     setRelationship(updated);
     setInputInviteCode('');
+    await loadData();
     playCalmChime();
   };
 
@@ -174,44 +179,8 @@ export const UsView: React.FC<UsViewProps> = ({ onOpenINeedYou }) => {
   const isLinked = relationship.status === 'accepted';
   const activeAlerts = emergencyRequests.filter((r) => r.status === 'active');
 
-  // Her / Partner Goals (when connected)
-  const partnerGoals: Goal[] = isLinked
-    ? [
-        {
-          id: 'pg-1',
-          user_id: 'partner',
-          title: 'Daily Qur’an Muraaja (3 Pages)',
-          description: 'Maintaining consistency before Fajr or after Maghrib',
-          category: 'Deen',
-          progress: 80,
-          status: 'in_progress',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        {
-          id: 'pg-2',
-          user_id: 'partner',
-          title: 'Arabic Syntax & Grammar Study',
-          description: 'Focusing on Quranic vocabulary and comprehension',
-          category: 'Education',
-          progress: 50,
-          status: 'in_progress',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        {
-          id: 'pg-3',
-          user_id: 'partner',
-          title: 'Emotional Restraint & Quiet Patience',
-          description: 'Responding with gentleness and mindful reflection',
-          category: 'Character',
-          progress: 75,
-          status: 'in_progress',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-      ]
-    : [];
+  // Her / Partner Goals are loaded from the connected account.
+
 
   return (
     <div className="space-y-5 pb-12">
