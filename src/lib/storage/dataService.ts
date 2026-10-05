@@ -12,7 +12,8 @@ import {
   PrayerSettings, 
   DhikrProgress, 
   QuranTask, 
-  EmergencyRequest 
+  EmergencyRequest,
+  DailyQuizRecord
 } from '../../types/database';
 import { getSupabase, isSupabaseConfigured } from '../supabase/client';
 
@@ -25,6 +26,7 @@ const STORAGE_KEYS = {
   GOALS: 'amanah_goals_v1',
   SHARED_GOALS: 'amanah_shared_goals_v1',
   RELATIONSHIPS: 'amanah_relationship_v1',
+  QUIZ_SCORES: 'amanah_quiz_scores_v1',
   COURSES: 'amanah_courses_v1',
   MEMORIES: 'amanah_memories_v1',
   PRAYER_SETTINGS: 'amanah_prayer_settings_v1',
@@ -243,6 +245,204 @@ function writeLocal<T>(key: string, value: T): void {
 // ---------------- DATA SERVICE CLASS ----------------
 
 class AmanahDataService {
+  private emergencyListeners: Array<(requests: EmergencyRequest[]) => void> = [];
+  private quizListeners: Array<(score: DailyQuizRecord) => void> = [];
+  private eventSource: EventSource | null = null;
+  private pollInterval: any = null;
+  private currentSyncUserId: string = 'local-user';
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      const profile = this.getProfile();
+      this.initEmergencySync(profile.user_id);
+    }
+  }
+
+  // Realtime subscription for emergency requests
+  subscribeEmergency(listener: (requests: EmergencyRequest[]) => void): () => void {
+    this.emergencyListeners.push(listener);
+    listener(this.getEmergencyRequests());
+    return () => {
+      this.emergencyListeners = this.emergencyListeners.filter((l) => l !== listener);
+    };
+  }
+
+  private notifyEmergencyListeners(requests?: EmergencyRequest[]): void {
+    const list = requests || this.getEmergencyRequests();
+    this.emergencyListeners.forEach((l) => l(list));
+  }
+
+  // Start SSE & Polling sync for emergency alerts and shared updates
+  initEmergencySync(userId: string): void {
+    if (typeof window === 'undefined') return;
+    this.currentSyncUserId = userId;
+
+    if (this.eventSource) {
+      try { this.eventSource.close(); } catch {}
+      this.eventSource = null;
+    }
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
+    }
+
+    // 1. SSE Connection for instant Realtime dispatch
+    try {
+      const es = new EventSource(`/api/emergency/stream?userId=${encodeURIComponent(userId)}`);
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'emergency_update') {
+            this.fetchActiveEmergencyRequests(userId);
+          }
+        } catch {}
+      };
+      this.eventSource = es;
+    } catch (err) {
+      console.warn('SSE connection note:', err);
+    }
+
+    // 2. Reliable Polling fallback every 4 seconds
+    this.fetchActiveEmergencyRequests(userId);
+    this.pollInterval = setInterval(() => {
+      this.fetchActiveEmergencyRequests(this.currentSyncUserId);
+    }, 4000);
+  }
+
+  async fetchActiveEmergencyRequests(userId: string): Promise<EmergencyRequest[]> {
+    try {
+      const res = await fetch(`/api/emergency/active?userId=${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.requests) {
+          const current = this.getEmergencyRequests();
+          const activeIds = new Set(data.requests.map((r: EmergencyRequest) => r.id));
+          const updated = [
+            ...data.requests,
+            ...current.filter((r) => !activeIds.has(r.id)),
+          ];
+          writeLocal(STORAGE_KEYS.EMERGENCY_REQUESTS, updated);
+          this.notifyEmergencyListeners(updated);
+          return updated;
+        }
+      }
+    } catch {}
+    return this.getEmergencyRequests();
+  }
+
+  async syncRelationshipFromServer(userId: string): Promise<Relationship> {
+    try {
+      const res = await fetch(`/api/relationships/${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.relationship) {
+          const current = this.getRelationship();
+          const merged: Relationship = {
+            ...current,
+            id: data.relationship.id,
+            user_a: data.relationship.user_a,
+            user_b: data.relationship.user_b || current.user_b,
+            invite_code: data.relationship.invite_code,
+            status: data.relationship.status,
+            partner_name: data.partnerName || current.partner_name,
+            accepted_at: data.relationship.accepted_at || current.accepted_at,
+          };
+          writeLocal(STORAGE_KEYS.RELATIONSHIPS, merged);
+          return merged;
+        }
+      }
+    } catch {}
+    return this.getRelationship();
+  }
+
+  // Realtime subscription for quiz scores
+  subscribeQuizScore(listener: (score: DailyQuizRecord) => void): () => void {
+    this.quizListeners.push(listener);
+    listener(this.getDailyQuizRecord());
+    return () => {
+      this.quizListeners = this.quizListeners.filter((l) => l !== listener);
+    };
+  }
+
+  private notifyQuizListeners(score?: DailyQuizRecord): void {
+    const record = score || this.getDailyQuizRecord();
+    this.quizListeners.forEach((l) => l(record));
+  }
+
+  getDailyQuizRecord(dateKey: string = getTodayKey()): DailyQuizRecord {
+    const all = readLocal<Record<string, DailyQuizRecord>>(STORAGE_KEYS.QUIZ_SCORES, {});
+    return all[dateKey] || {
+      date: dateKey,
+      score: 0,
+      total: 5,
+      completed: false,
+      answers: {},
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  async saveDailyQuizAnswer(
+    dateKey: string,
+    questionId: string,
+    answer: string,
+    isCorrect: boolean
+  ): Promise<DailyQuizRecord> {
+    const all = readLocal<Record<string, DailyQuizRecord>>(STORAGE_KEYS.QUIZ_SCORES, {});
+    const current = all[dateKey] || {
+      date: dateKey,
+      score: 0,
+      total: 5,
+      completed: false,
+      answers: {},
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (current.answers[questionId] === undefined) {
+      current.answers[questionId] = answer;
+      if (isCorrect) {
+        current.score += 1;
+      }
+      current.updatedAt = new Date().toISOString();
+      if (Object.keys(current.answers).length >= 5) {
+        current.completed = true;
+      }
+      all[dateKey] = current;
+      writeLocal(STORAGE_KEYS.QUIZ_SCORES, all);
+      this.notifyQuizListeners(current);
+
+      const profile = this.getProfile();
+      try {
+        await fetch('/api/quiz/score', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: profile.user_id,
+            dateKey,
+            score: current.score,
+            total: current.total,
+          }),
+        });
+      } catch {}
+    }
+    return current;
+  }
+
+  async syncQuizScoreToServer(score: number, total: number = 5, dateKey: string = getTodayKey()): Promise<void> {
+    const profile = this.getProfile();
+    try {
+      await fetch('/api/quiz/score', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: profile.user_id,
+          dateKey,
+          score,
+          total,
+        }),
+      });
+    } catch {}
+  }
+
   // ---------------- CONNECTED US DATA ----------------
 
   private async getAuthUserId(): Promise<string | null> {

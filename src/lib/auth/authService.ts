@@ -48,7 +48,9 @@ class AuthService {
     // Check if Supabase auth listener is available
     const sb = getSupabase();
     if (sb) {
-      sb.auth.onAuthStateChange((_event, session) => {
+      sb.auth.onAuthStateChange((event, session) => {
+        // CRITICAL BUG FIX: Only adopt Supabase session if it exists.
+        // DO NOT wipe out existing local session on INITIAL_SESSION when session is null.
         if (session?.user) {
           const user: UserAccount = {
             id: session.user.id,
@@ -57,7 +59,7 @@ class AuthService {
             created_at: session.user.created_at || new Date().toISOString(),
           };
           this.setLocalSession({ user, token: session.access_token });
-        } else {
+        } else if (event === 'SIGNED_OUT') {
           this.setLocalSession({ user: null, token: null });
         }
       });
@@ -118,6 +120,8 @@ class AuthService {
     displayName: string
   ): Promise<{ user: UserAccount; error: string | null }> {
     const cleanEmail = email.trim().toLowerCase();
+    const cleanName = displayName.trim() || cleanEmail.split('@')[0] || 'Seeker';
+
     if (!cleanEmail || !cleanEmail.includes('@')) {
       return { user: null as unknown as UserAccount, error: 'Please provide a valid email address.' };
     }
@@ -125,36 +129,7 @@ class AuthService {
       return { user: null as unknown as UserAccount, error: 'Password must be at least 6 characters long.' };
     }
 
-    // Try Supabase first if configured
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        const { data, error } = await sb.auth.signUp({
-          email: cleanEmail,
-          password: pass,
-          options: {
-            data: { display_name: displayName.trim() || 'Seeker' },
-          },
-        });
-        if (error) {
-          return { user: null as unknown as UserAccount, error: error.message };
-        }
-        if (data.user) {
-          const user: UserAccount = {
-            id: data.user.id,
-            email: data.user.email || cleanEmail,
-            display_name: displayName.trim() || cleanEmail.split('@')[0],
-            created_at: new Date().toISOString(),
-          };
-          this.setLocalSession({ user, token: data.session?.access_token || 'supabase-token' });
-          return { user, error: null };
-        }
-      } catch (err: unknown) {
-        console.warn('Supabase sign up failed, falling back to secure local store:', err);
-      }
-    }
-
-    // Secure Local Storage Authentication
+    // 1. Always store locally with salted SHA-256 hash first
     const users = this.getStoredUsers();
     if (users.some((u) => u.email === cleanEmail)) {
       return { user: null as unknown as UserAccount, error: 'An account with this email already exists. Please log in.' };
@@ -169,7 +144,7 @@ class AuthService {
       email: cleanEmail,
       passwordHash,
       salt,
-      display_name: displayName.trim() || cleanEmail.split('@')[0],
+      display_name: cleanName,
       created_at: new Date().toISOString(),
     };
 
@@ -183,6 +158,32 @@ class AuthService {
       created_at: newCred.created_at,
     };
 
+    // 2. Also register on backend server API for cross-device synchronization
+    try {
+      fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: cleanEmail, password: pass, displayName: cleanName }),
+      }).catch(() => {});
+    } catch {
+      // Offline fallback is already active
+    }
+
+    // 3. Attempt Supabase sync in background (non-blocking)
+    const sb = getSupabase();
+    if (sb) {
+      try {
+        sb.auth.signUp({
+          email: cleanEmail,
+          password: pass,
+          options: { data: { display_name: cleanName } },
+        }).catch((err) => console.warn('Supabase background signup note:', err));
+      } catch {
+        // Non-blocking
+      }
+    }
+
+    // 4. Set persistent session
     this.setLocalSession({ user, token: 'session_' + Math.random().toString(36) });
     return { user, error: null };
   }
@@ -193,7 +194,63 @@ class AuthService {
       return { user: null as unknown as UserAccount, error: 'Email and password are required.' };
     }
 
-    // Try Supabase first if configured
+    // 1. Try local verified credentials first
+    const users = this.getStoredUsers();
+    const localFound = users.find((u) => u.email === cleanEmail);
+    if (localFound) {
+      const testHash = await hashPassword(pass, localFound.salt);
+      if (testHash === localFound.passwordHash) {
+        const user: UserAccount = {
+          id: localFound.id,
+          email: localFound.email,
+          display_name: localFound.display_name,
+          created_at: localFound.created_at,
+        };
+        this.setLocalSession({ user, token: 'session_' + Math.random().toString(36) });
+
+        // Sync with backend server in background
+        fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: cleanEmail, password: pass }),
+        }).catch(() => {});
+
+        return { user, error: null };
+      } else {
+        return { user: null as unknown as UserAccount, error: 'Incorrect password. Please try again.' };
+      }
+    }
+
+    // 2. If not found locally, try backend server API (e.g. user registered on another device)
+    try {
+      const serverRes = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: cleanEmail, password: pass }),
+      });
+      const serverData = await serverRes.json();
+      if (serverRes.ok && serverData.user) {
+        const user = serverData.user as UserAccount;
+        // Save to local credentials so future logins work instantly offline
+        const salt = generateSalt();
+        const passwordHash = await hashPassword(pass, salt);
+        users.push({
+          id: user.id,
+          email: user.email,
+          passwordHash,
+          salt,
+          display_name: user.display_name,
+          created_at: user.created_at,
+        });
+        this.saveStoredUsers(users);
+        this.setLocalSession({ user, token: serverData.token || 'session_' + Math.random().toString(36) });
+        return { user, error: null };
+      }
+    } catch {
+      // Continue to Supabase check
+    }
+
+    // 3. Try Supabase
     const sb = getSupabase();
     if (sb) {
       try {
@@ -212,31 +269,14 @@ class AuthService {
           return { user, error: null };
         }
       } catch (err: unknown) {
-        console.warn('Supabase sign-in failed, trying local store:', err);
+        console.warn('Supabase sign-in note:', err);
       }
     }
 
-    // Check secure local store
-    const users = this.getStoredUsers();
-    const found = users.find((u) => u.email === cleanEmail);
-    if (!found) {
-      return { user: null as unknown as UserAccount, error: 'No account found with this email. Please check your email or sign up.' };
-    }
-
-    const testHash = await hashPassword(pass, found.salt);
-    if (testHash !== found.passwordHash) {
-      return { user: null as unknown as UserAccount, error: 'Incorrect password. Please try again.' };
-    }
-
-    const user: UserAccount = {
-      id: found.id,
-      email: found.email,
-      display_name: found.display_name,
-      created_at: found.created_at,
+    return {
+      user: null as unknown as UserAccount,
+      error: 'No account found with this email. Please check your spelling or create an account.',
     };
-
-    this.setLocalSession({ user, token: 'session_' + Math.random().toString(36) });
-    return { user, error: null };
   }
 
   async signOut(): Promise<void> {
@@ -259,15 +299,23 @@ class AuthService {
 
     const users = this.getStoredUsers();
     const idx = users.findIndex((u) => u.email === cleanEmail);
-    if (idx === -1) {
-      return { success: false, error: 'Account not found with this email.' };
+    if (idx !== -1) {
+      const newSalt = generateSalt();
+      const newHash = await hashPassword(newPass, newSalt);
+      users[idx].salt = newSalt;
+      users[idx].passwordHash = newHash;
+      this.saveStoredUsers(users);
     }
 
-    const newSalt = generateSalt();
-    const newHash = await hashPassword(newPass, newSalt);
-    users[idx].salt = newSalt;
-    users[idx].passwordHash = newHash;
-    this.saveStoredUsers(users);
+    try {
+      await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: cleanEmail, newPassword: newPass }),
+      });
+    } catch {
+      // offline
+    }
 
     return { success: true, error: null };
   }

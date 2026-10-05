@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { apiRouter } from './src/server/api.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +13,7 @@ async function startServer() {
   const distPath = path.resolve(__dirname, 'dist');
 
   app.use(express.json());
+  app.use('/api', apiRouter);
 
   // Explicit routes for PWA manifest and service worker
   app.get(['/manifest.webmanifest', '/manifest.json'], (req, res) => {
@@ -33,7 +35,16 @@ async function startServer() {
     res.status(404).send('SW not found');
   });
 
-  // Check if dist exists, if not build or serve fallback
+  // Check if dist exists, if not build
+  if (!fs.existsSync(distPath)) {
+    try {
+      const { execSync } = await import('child_process');
+      execSync('npm run build', { stdio: 'inherit' });
+    } catch (e) {
+      console.warn('Could not run build synchronously:', e);
+    }
+  }
+
   if (fs.existsSync(distPath)) {
     app.use(express.static(distPath, {
       setHeaders: (res, filePath) => {

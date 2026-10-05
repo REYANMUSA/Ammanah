@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   BookOpen, 
   RotateCcw, 
@@ -15,12 +15,15 @@ import {
   BookMarked,
   Share2,
   Sun,
-  Moon
+  Moon,
+  Award,
+  Trophy,
+  Filter
 } from 'lucide-react';
-import { DhikrProgress, HadithItem, QuranTask, PrayerSettings } from '../../types/database';
+import { DhikrProgress, HadithItem, QuranTask, PrayerSettings, DailyQuizRecord, DeenChallenge } from '../../types/database';
 import { dataService, getTodayKey } from '../../lib/storage/dataService';
 import { AUTHENTIC_HADITHS, getHadithForDay } from '../../data/hadiths';
-import { AUTHENTIC_CHALLENGES } from '../../data/challenges';
+import { getDaily5Questions, getAllQuestions, getChallengeCategories, getDayOfYear } from '../../data/challenges';
 import { getCalculatedPrayerTimes, PrayerSchedule } from '../../lib/prayer/prayerTimes';
 import { playCalmChime, triggerHapticFeedback } from '../../lib/notifications/notificationService';
 import { DailyDhikrModule } from './DailyDhikrModule';
@@ -32,9 +35,7 @@ interface DeenViewProps {
 
 export const DeenView: React.FC<DeenViewProps> = () => {
   const todayKey = getTodayKey();
-  const dayOfYear = Math.floor(
-    (new Date().getTime() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 1000 / 60 / 60 / 24
-  );
+  const dayOfYear = getDayOfYear();
 
   const [activeSection, setActiveSection] = useState<'prayer' | 'dhikr' | 'hadith' | 'quran' | 'challenge'>('prayer');
   const [dhikrTab, setDhikrTab] = useState<'daily' | 'istighfar'>('daily');
@@ -55,17 +56,33 @@ export const DeenView: React.FC<DeenViewProps> = () => {
   // Quran State
   const [quranTask, setQuranTask] = useState<QuranTask>(dataService.getQuranTask(todayKey));
 
-  // Challenge State
-  const [challengeIndex, setChallengeIndex] = useState(0);
+  // Challenge (Daily 5 & All Questions) State
+  const [challengeSubTab, setChallengeSubTab] = useState<'daily5' | 'all'>('daily5');
+  const dailyQuestions = useMemo(() => getDaily5Questions(todayKey), [todayKey]);
+  const allQuestions = useMemo(() => getAllQuestions(), []);
+  const allCategories = useMemo(() => ['All', ...getChallengeCategories()], []);
+  const [selectedCategory, setSelectedCategory] = useState<string>('All');
+
+  const [dailyIndex, setDailyIndex] = useState(0);
+  const [quizRecord, setQuizRecord] = useState<DailyQuizRecord>(dataService.getDailyQuizRecord(todayKey));
   const [selectedAnswer, setSelectedAnswer] = useState<string | null>(null);
   const [hasAnswered, setHasAnswered] = useState(false);
+  const [allAnswerMap, setAllAnswerMap] = useState<Record<string, { answer: string; hasAnswered: boolean }>>({});
 
   useEffect(() => {
     // Update prayer times clock
     const timer = setInterval(() => {
       setSchedule(getCalculatedPrayerTimes());
     }, 60000);
-    return () => clearInterval(timer);
+
+    const unsubscribeQuiz = dataService.subscribeQuizScore((rec) => {
+      setQuizRecord(rec);
+    });
+
+    return () => {
+      clearInterval(timer);
+      unsubscribeQuiz();
+    };
   }, []);
 
   const handleIncrementDhikr = async () => {
@@ -119,22 +136,62 @@ export const DeenView: React.FC<DeenViewProps> = () => {
     setPrayerSettings(updated);
   };
 
-  const currentChallenge = AUTHENTIC_CHALLENGES[challengeIndex % AUTHENTIC_CHALLENGES.length];
+  const currentDailyQ = dailyQuestions[dailyIndex] || dailyQuestions[0];
 
-  const handleAnswerSelect = (option: 'A' | 'B' | 'C' | 'D') => {
+  const handleAnswerSelect = async (option: 'A' | 'B' | 'C' | 'D') => {
     if (hasAnswered) return;
     setSelectedAnswer(option);
     setHasAnswered(true);
     triggerHapticFeedback();
-    if (option === currentChallenge.correct_answer) {
+
+    const isCorrect = option === currentDailyQ.correct_answer;
+    if (isCorrect) {
       playCalmChime();
+    }
+
+    const updated = await dataService.saveDailyQuizAnswer(todayKey, currentDailyQ.id, option, isCorrect);
+    setQuizRecord(updated);
+
+    // If finished 5th question, trigger celebration
+    if (dailyIndex === 4 || Object.keys(updated.answers).length >= 5) {
+      try {
+        confetti({
+          particleCount: 45,
+          spread: 70,
+          origin: { y: 0.6 },
+          colors: ['#2E473B', '#E2D4B7', '#7F5353'],
+        });
+      } catch {}
     }
   };
 
   const handleNextChallenge = () => {
-    setSelectedAnswer(null);
-    setHasAnswered(false);
-    setChallengeIndex((prev) => (prev + 1) % AUTHENTIC_CHALLENGES.length);
+    if (dailyIndex < 4) {
+      const nextIdx = dailyIndex + 1;
+      setDailyIndex(nextIdx);
+      const nextQ = dailyQuestions[nextIdx];
+      const prevAnswer = quizRecord.answers[nextQ.id];
+      if (prevAnswer) {
+        setSelectedAnswer(prevAnswer);
+        setHasAnswered(true);
+      } else {
+        setSelectedAnswer(null);
+        setHasAnswered(false);
+      }
+    }
+  };
+
+  const handleSelectDailyIndex = (idx: number) => {
+    setDailyIndex(idx);
+    const q = dailyQuestions[idx];
+    const prevAnswer = quizRecord.answers[q.id];
+    if (prevAnswer) {
+      setSelectedAnswer(prevAnswer);
+      setHasAnswered(true);
+    } else {
+      setSelectedAnswer(null);
+      setHasAnswered(false);
+    }
   };
 
   return (
@@ -199,7 +256,7 @@ export const DeenView: React.FC<DeenViewProps> = () => {
               : 'text-[#6B756E] hover:text-[#1F2421]'
           }`}
         >
-          Deen Challenge
+          Hadith Questions (5 Daily)
         </button>
       </div>
 
@@ -462,80 +519,285 @@ export const DeenView: React.FC<DeenViewProps> = () => {
         </div>
       )}
 
-      {/* 5. DEEN CHALLENGE */}
+      {/* 5. HADITH QUESTIONS (DAILY 5 FOR 365 DAYS & ALL QUESTIONS) */}
       {activeSection === 'challenge' && (
         <div className="space-y-4">
-          <div className="p-5 rounded-2xl bg-white border border-[#EAE6DD] shadow-xs space-y-4">
-            <div className="flex items-center justify-between text-xs text-[#7A6B53]">
-              <span className="font-semibold uppercase tracking-wider">{currentChallenge.category}</span>
-              <span>Question {challengeIndex + 1} of {AUTHENTIC_CHALLENGES.length}</span>
-            </div>
-
-            <h3 className="text-sm font-semibold text-[#1F2421] leading-relaxed">
-              {currentChallenge.question}
-            </h3>
-
-            {/* Options */}
-            <div className="space-y-2">
-              {[
-                { key: 'A' as const, text: currentChallenge.option_a },
-                { key: 'B' as const, text: currentChallenge.option_b },
-                { key: 'C' as const, text: currentChallenge.option_c },
-                { key: 'D' as const, text: currentChallenge.option_d },
-              ].map((opt) => {
-                const isSelected = selectedAnswer === opt.key;
-                const isCorrect = currentChallenge.correct_answer === opt.key;
-
-                let btnStyle = 'bg-white border-[#EAE6DD] text-[#1F2421] hover:border-[#D5CEC2]';
-                if (hasAnswered) {
-                  if (isCorrect) {
-                    btnStyle = 'bg-[#EBF3ED] border-[#81B98F] text-[#1C512C] font-semibold';
-                  } else if (isSelected) {
-                    btnStyle = 'bg-[#FAECE7] border-[#E8927A] text-[#9E2F11]';
-                  } else {
-                    btnStyle = 'opacity-50 border-[#EAE6DD] text-[#6B756E]';
-                  }
-                }
-
-                return (
-                  <button
-                    key={opt.key}
-                    onClick={() => handleAnswerSelect(opt.key)}
-                    disabled={hasAnswered}
-                    className={`w-full p-3 rounded-xl border text-left text-xs transition-all flex items-start gap-2.5 ${btnStyle}`}
-                  >
-                    <span className="w-5 h-5 rounded-full border border-current flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
-                      {opt.key}
-                    </span>
-                    <span className="flex-1 leading-snug">{opt.text}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Explanation & Source */}
-            {hasAnswered && (
-              <div className="p-4 rounded-xl bg-[#F6F4ED] border border-[#E5DFD3] text-xs space-y-2 animate-in fade-in duration-300">
-                <div className="flex items-center gap-1.5 font-semibold text-[#2E473B]">
-                  <Sparkles className="w-3.5 h-3.5 text-[#988158]" />
-                  <span>Explanation & Authentic Source</span>
-                </div>
-                <p className="text-[#505D54] leading-relaxed">
-                  {currentChallenge.explanation}
-                </p>
-                <p className="text-[11px] text-[#7A6B53] font-mono">
-                  Source: {currentChallenge.source}
-                </p>
-
-                <button
-                  onClick={handleNextChallenge}
-                  className="mt-3 w-full py-2 rounded-xl bg-[#2E473B] text-white text-xs font-medium hover:bg-[#23372E] transition-colors"
-                >
-                  Next Question
-                </button>
-              </div>
-            )}
+          {/* Sub-Tabs: Today's 5 Questions vs All Questions */}
+          <div className="flex items-center gap-1.5 p-1 bg-[#F4F1EA] rounded-xl text-xs font-medium">
+            <button
+              onClick={() => setChallengeSubTab('daily5')}
+              className={`flex-1 py-2 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                challengeSubTab === 'daily5'
+                  ? 'bg-white text-[#1F2421] font-semibold shadow-xs'
+                  : 'text-[#6B756E] hover:text-[#1F2421]'
+              }`}
+            >
+              <Award className="w-4 h-4 text-[#2E473B]" />
+              <span>Today’s 5 Questions · Day {dayOfYear}/365</span>
+            </button>
+            <button
+              onClick={() => setChallengeSubTab('all')}
+              className={`flex-1 py-2 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                challengeSubTab === 'all'
+                  ? 'bg-white text-[#1F2421] font-semibold shadow-xs'
+                  : 'text-[#6B756E] hover:text-[#1F2421]'
+              }`}
+            >
+              <BookOpen className="w-4 h-4 text-[#7F5353]" />
+              <span>All Questions Library ({allQuestions.length})</span>
+            </button>
           </div>
+
+          {/* Daily 5 Score & Progress Card */}
+          <div className="p-4 rounded-2xl bg-white border border-[#EAE6DD] shadow-xs flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-[#FAF0E6] border border-[#EADBBD] flex items-center justify-center text-[#7F5353] shrink-0">
+                <Trophy className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-[#1F2421]">
+                    Today’s Score: {quizRecord.score} / 5
+                  </span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border ${
+                    quizRecord.completed
+                      ? 'bg-[#EBF3ED] text-[#1C512C] border-[#C1DEC9]'
+                      : 'bg-[#FAF4E8] text-[#8C6014] border-[#E9D9B2]'
+                  }`}>
+                    {quizRecord.completed ? 'Completed ✓' : `${5 - Object.keys(quizRecord.answers).length} to go`}
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#7A6B53] mt-0.5">
+                  Synchronized with the Us section for your partner to observe.
+                </p>
+              </div>
+            </div>
+            <div className="text-right shrink-0">
+              <span className="text-base font-serif font-bold text-[#2E473B]">
+                {Math.round((quizRecord.score / 5) * 100)}%
+              </span>
+              <span className="block text-[9px] text-[#7A6B53]">Accuracy</span>
+            </div>
+          </div>
+
+          {challengeSubTab === 'daily5' ? (
+            <div className="space-y-4">
+              {/* Question Stepper 1..5 */}
+              <div className="grid grid-cols-5 gap-1.5 p-1 bg-white rounded-xl border border-[#EAE6DD]">
+                {dailyQuestions.map((q, idx) => {
+                  const isAnswered = quizRecord.answers[q.id] !== undefined;
+                  const isCurrent = idx === dailyIndex;
+                  return (
+                    <button
+                      key={q.id}
+                      onClick={() => handleSelectDailyIndex(idx)}
+                      className={`py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition-all ${
+                        isCurrent
+                          ? 'bg-[#2E473B] text-white shadow-xs'
+                          : isAnswered
+                          ? 'bg-[#EBF3ED] text-[#1C512C]'
+                          : 'bg-[#F4F1EA] text-[#6B756E] hover:bg-[#EAE6DD]'
+                      }`}
+                    >
+                      {isAnswered && <CheckCircle2 className="w-3 h-3" />}
+                      <span>Q{idx + 1}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Active Daily Question Card */}
+              <div className="p-5 rounded-2xl bg-white border border-[#EAE6DD] shadow-xs space-y-4">
+                <div className="flex items-center justify-between text-xs text-[#7A6B53]">
+                  <span className="font-semibold uppercase tracking-wider bg-[#F4F1EA] px-2 py-0.5 rounded-md text-[10px]">
+                    {currentDailyQ.category}
+                  </span>
+                  <span className="font-mono text-[11px]">
+                    Question {dailyIndex + 1} of 5 · Day {dayOfYear}/365
+                  </span>
+                </div>
+
+                <h3 className="text-sm font-semibold text-[#1F2421] leading-relaxed">
+                  {currentDailyQ.question}
+                </h3>
+
+                {/* Options */}
+                <div className="space-y-2">
+                  {[
+                    { key: 'A' as const, text: currentDailyQ.option_a },
+                    { key: 'B' as const, text: currentDailyQ.option_b },
+                    { key: 'C' as const, text: currentDailyQ.option_c },
+                    { key: 'D' as const, text: currentDailyQ.option_d },
+                  ].map((opt) => {
+                    const isSelected = selectedAnswer === opt.key;
+                    const isCorrect = currentDailyQ.correct_answer === opt.key;
+
+                    let btnStyle = 'bg-white border-[#EAE6DD] text-[#1F2421] hover:border-[#D5CEC2]';
+                    if (hasAnswered) {
+                      if (isCorrect) {
+                        btnStyle = 'bg-[#EBF3ED] border-[#81B98F] text-[#1C512C] font-semibold';
+                      } else if (isSelected) {
+                        btnStyle = 'bg-[#FAECE7] border-[#E8927A] text-[#9E2F11]';
+                      } else {
+                        btnStyle = 'opacity-50 border-[#EAE6DD] text-[#6B756E]';
+                      }
+                    }
+
+                    return (
+                      <button
+                        key={opt.key}
+                        onClick={() => handleAnswerSelect(opt.key)}
+                        disabled={hasAnswered}
+                        className={`w-full p-3 rounded-xl border text-left text-xs transition-all flex items-start gap-2.5 ${btnStyle}`}
+                      >
+                        <span className="w-5 h-5 rounded-full border border-current flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
+                          {opt.key}
+                        </span>
+                        <span className="flex-1 leading-snug">{opt.text}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Explanation & Source */}
+                {hasAnswered && (
+                  <div className="p-4 rounded-xl bg-[#F6F4ED] border border-[#E5DFD3] text-xs space-y-2 animate-in fade-in duration-300">
+                    <div className="flex items-center gap-1.5 font-semibold text-[#2E473B]">
+                      <Sparkles className="w-3.5 h-3.5 text-[#988158]" />
+                      <span>Authentic Explanation & Source</span>
+                    </div>
+                    <p className="text-[#505D54] leading-relaxed">
+                      {currentDailyQ.explanation}
+                    </p>
+                    <p className="text-[11px] text-[#7A6B53] font-mono">
+                      Source: {currentDailyQ.source}
+                    </p>
+
+                    {dailyIndex < 4 ? (
+                      <button
+                        onClick={handleNextChallenge}
+                        className="mt-3 w-full py-2.5 rounded-xl bg-[#2E473B] text-white text-xs font-semibold hover:bg-[#23372E] transition-colors shadow-xs"
+                      >
+                        Next Question ({dailyIndex + 2} of 5)
+                      </button>
+                    ) : (
+                      <div className="mt-3 p-3 rounded-xl bg-[#EBF3ED] border border-[#C1DEC9] text-center space-y-1">
+                        <div className="flex items-center justify-center gap-1.5 text-xs font-bold text-[#1C512C]">
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>Masha’Allah! Today’s 5 Questions Complete</span>
+                        </div>
+                        <p className="text-[11px] text-[#405646]">
+                          Your final score of {quizRecord.score}/5 is saved and visible in the Us section.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* ALL QUESTIONS LIBRARY */
+            <div className="space-y-4">
+              {/* Category Pills */}
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 text-xs">
+                {allCategories.map((cat) => (
+                  <button
+                    key={cat}
+                    onClick={() => setSelectedCategory(cat)}
+                    className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-all ${
+                      selectedCategory === cat
+                        ? 'bg-[#2E473B] text-white font-semibold shadow-xs'
+                        : 'bg-white text-[#6B756E] border border-[#EAE6DD] hover:text-[#1F2421]'
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+
+              {/* Questions List */}
+              <div className="space-y-3">
+                {allQuestions
+                  .filter((q) => selectedCategory === 'All' || q.category === selectedCategory)
+                  .map((q, idx) => {
+                    const ansState = allAnswerMap[q.id];
+                    return (
+                      <div
+                        key={q.id}
+                        className="p-4 rounded-2xl bg-white border border-[#EAE6DD] shadow-xs space-y-3"
+                      >
+                        <div className="flex items-center justify-between text-xs text-[#7A6B53]">
+                          <span className="font-semibold uppercase tracking-wider text-[10px] bg-[#F4F1EA] px-2 py-0.5 rounded-md">
+                            {q.category}
+                          </span>
+                          <span className="text-[10px] font-mono text-[#7A6B53]">
+                            Question {idx + 1}
+                          </span>
+                        </div>
+
+                        <h4 className="text-xs font-semibold text-[#1F2421] leading-relaxed">
+                          {q.question}
+                        </h4>
+
+                        <div className="space-y-1.5">
+                          {[
+                            { key: 'A' as const, text: q.option_a },
+                            { key: 'B' as const, text: q.option_b },
+                            { key: 'C' as const, text: q.option_c },
+                            { key: 'D' as const, text: q.option_d },
+                          ].map((opt) => {
+                            const isChosen = ansState?.answer === opt.key;
+                            const isCorrect = q.correct_answer === opt.key;
+                            let style = 'bg-[#FAF8F3] border-[#EAE6DD] text-[#333E35]';
+                            if (ansState?.hasAnswered) {
+                              if (isCorrect) {
+                                style = 'bg-[#EBF3ED] border-[#81B98F] text-[#1C512C] font-semibold';
+                              } else if (isChosen) {
+                                style = 'bg-[#FAECE7] border-[#E8927A] text-[#9E2F11]';
+                              } else {
+                                style = 'opacity-40 border-[#EAE6DD] text-[#6B756E]';
+                              }
+                            }
+                            return (
+                              <button
+                                key={opt.key}
+                                onClick={() => {
+                                  if (!ansState?.hasAnswered) {
+                                    setAllAnswerMap((prev) => ({
+                                      ...prev,
+                                      [q.id]: { answer: opt.key, hasAnswered: true },
+                                    }));
+                                    triggerHapticFeedback();
+                                    if (opt.key === q.correct_answer) playCalmChime();
+                                  }
+                                }}
+                                className={`w-full p-2.5 rounded-xl border text-left text-xs flex items-start gap-2 transition-all ${style}`}
+                              >
+                                <span className="w-4 h-4 rounded-full border border-current flex items-center justify-center text-[9px] font-bold shrink-0 mt-0.5">
+                                  {opt.key}
+                                </span>
+                                <span className="flex-1">{opt.text}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {ansState?.hasAnswered && (
+                          <div className="p-3 rounded-xl bg-[#F6F4ED] border border-[#E5DFD3] text-xs space-y-1.5">
+                            <p className="text-[#505D54] leading-relaxed">
+                              {q.explanation}
+                            </p>
+                            <p className="text-[10px] text-[#7A6B53] font-mono">
+                              Source: {q.source}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

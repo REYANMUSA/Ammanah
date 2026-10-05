@@ -232,3 +232,24 @@ export interface PushSubscriptionItem {
   created_at: string;
   updated_at: string;
 }
+
+export interface PartnerProfile {
+  id: string;
+  name: string;
+  email: string;
+  bio: string;
+  status: string;
+  streak_count?: number;
+  target_nikah_date?: string;
+  connected_since: string;
+  today_quiz_score?: { score: number; total: number; date: string } | null;
+}
+
+export interface DailyQuizRecord {
+  date: string;
+  score: number;
+  total: number;
+  completed: boolean;
+  answers: Record<string, string>;
+  updatedAt: string;
+}

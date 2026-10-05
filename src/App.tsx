@@ -12,13 +12,14 @@ import { SettingsModal } from './components/settings/SettingsModal';
 import { OnboardingModal } from './components/onboarding/OnboardingModal';
 import { AuthModal } from './components/auth/AuthModal';
 import { OfflineIndicator } from './components/pwa/OfflineIndicator';
-import { Profile, ThemePreference, Gender } from './types/database';
+import { Profile, ThemePreference, Gender, EmergencyRequest } from './types/database';
 import { dataService } from './lib/storage/dataService';
 import { authService, UserAccount } from './lib/auth/authService';
 
 export default function App() {
   const [profile, setProfile] = useState<Profile>(dataService.getProfile());
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(authService.getSession().user);
+  const [emergencyAlerts, setEmergencyAlerts] = useState<EmergencyRequest[]>([]);
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [showSplash, setShowSplash] = useState(true);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -35,17 +36,36 @@ export default function App() {
     const currentProfile = dataService.getProfile();
     setProfile(currentProfile);
 
+    // Initial auth session check
+    const initialSession = authService.getSession();
+    if (initialSession.user) {
+      setCurrentUser(initialSession.user);
+      if (currentProfile.user_id !== initialSession.user.id) {
+        dataService.updateProfile({ user_id: initialSession.user.id, display_name: initialSession.user.display_name }).then(setProfile);
+      }
+      dataService.initEmergencySync(initialSession.user.id);
+      dataService.syncRelationshipFromServer(initialSession.user.id);
+    } else {
+      dataService.initEmergencySync(currentProfile.user_id);
+    }
+
     // Subscribe to auth session changes
     const unsubscribeAuth = authService.subscribe((session) => {
       setCurrentUser(session.user);
       if (session.user) {
-        // Sync display name if user has one
-        if (session.user.display_name && session.user.display_name !== currentProfile.display_name) {
-          dataService.updateProfile({ display_name: session.user.display_name }).then((p) => {
-            setProfile(p);
-          });
-        }
+        dataService.updateProfile({ user_id: session.user.id, display_name: session.user.display_name }).then(setProfile);
+        dataService.initEmergencySync(session.user.id);
+        dataService.syncRelationshipFromServer(session.user.id);
       }
+    });
+
+    // Subscribe to realtime emergency alerts
+    const unsubscribeEmergency = dataService.subscribeEmergency((requests) => {
+      const myId = authService.getSession().user?.id || dataService.getProfile().user_id;
+      const incomingActive = requests.filter(
+        (r) => r.status === 'active' && r.sender_user_id !== myId
+      );
+      setEmergencyAlerts(incomingActive);
     });
 
     // Splash screen timer
@@ -79,6 +99,7 @@ export default function App() {
     return () => {
       clearTimeout(splashTimer);
       unsubscribeAuth();
+      unsubscribeEmergency();
       window.removeEventListener('popstate', handlePopState);
     };
   }, [showCourses, showJourney, showINeedYou, showSettings, showOnboarding, showAuthModal, activeTab]);
@@ -100,18 +121,21 @@ export default function App() {
 
   const handleAuthSuccess = async (user: UserAccount) => {
     setCurrentUser(user);
-    if (user.display_name) {
-      const updated = await dataService.updateProfile({
-        display_name: user.display_name,
-        user_id: user.id,
-      });
-      setProfile(updated);
-    }
+    const updated = await dataService.updateProfile({
+      display_name: user.display_name,
+      user_id: user.id,
+    });
+    setProfile(updated);
+    dataService.initEmergencySync(user.id);
+    dataService.syncRelationshipFromServer(user.id);
   };
 
   const handleLogOut = async () => {
     await authService.signOut();
     setCurrentUser(null);
+    const updated = await dataService.updateProfile({ user_id: 'local-user' });
+    setProfile(updated);
+    dataService.initEmergencySync('local-user');
   };
 
   const handleTabChange = (tab: NavTab) => {
@@ -156,6 +180,7 @@ export default function App() {
       {/* Top Application Bar */}
       <TopBar
         currentUser={currentUser}
+        unreadAlertCount={emergencyAlerts.length}
         onOpenSettings={() => setShowSettings(true)}
         onOpenAuth={() => setShowAuthModal(true)}
         onOpenINeedYou={() => setShowINeedYou(true)}

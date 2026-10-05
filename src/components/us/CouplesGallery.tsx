@@ -20,6 +20,8 @@ import confetti from 'canvas-confetti';
 interface CouplesGalleryProps {
   memories: Memory[];
   onUpdateMemories: (updated: Memory[]) => void;
+  isLinked?: boolean;
+  partnerName?: string;
 }
 
 const PRESET_PHOTOS = [
@@ -53,6 +55,8 @@ const EVENT_TYPES: MemoryEventType[] = [
 export const CouplesGallery: React.FC<CouplesGalleryProps> = ({
   memories,
   onUpdateMemories,
+  isLinked = false,
+  partnerName,
 }) => {
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
@@ -155,13 +159,13 @@ export const CouplesGallery: React.FC<CouplesGalleryProps> = ({
               <span className="text-xs font-serif font-bold text-[#1F2421]">
                 Couples Gallery · ذكرياتنا
               </span>
-              <span className="flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full bg-[#FAF5EA] text-[#8B6E38] font-medium border border-[#EADBBD]">
+              <span className="flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full bg-[#FAF5EA] text-[#8B6E38] font-medium border border-[#EADBBD]">
                 <Lock className="w-2.5 h-2.5" />
-                <span>Private</span>
+                <span>{isLinked ? `Shared with ${partnerName || 'Partner'}` : 'Private to you'}</span>
               </span>
             </div>
             <p className="text-[11px] text-[#7A6B53]">
-              Cherish shared milestones and peaceful memories together.
+              {isLinked ? `Cherish shared moments and milestones with ${partnerName || 'your partner'}.` : 'Cherish shared milestones and peaceful memories together.'}
             </p>
           </div>
         </div>
