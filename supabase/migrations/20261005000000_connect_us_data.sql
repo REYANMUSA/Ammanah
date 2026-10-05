@@ -59,9 +59,9 @@ create policy "Users can view linked partner goals"
       from public.relationships r
       where r.status = 'accepted'
         and (
-          (r.user_a = (select auth.uid())::text and r.user_b = public.goals.user_id)
+          (r.user_a = (select auth.uid())::text and r.user_b = public.goals.user_id::text)
           or
-          (r.user_b = (select auth.uid())::text and r.user_a = public.goals.user_id)
+          (r.user_b = (select auth.uid())::text and r.user_a = public.goals.user_id::text)
         )
     )
   );
